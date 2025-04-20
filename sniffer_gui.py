@@ -1,0 +1,135 @@
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+from scapy.all import sniff, IP, UDP, DNS
+from threading import Thread
+from datetime import datetime
+from collections import Counter
+import csv
+from tkinter import messagebox
+
+class PacketSnifferGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Network Packet Sniffer")
+        self.sniffing = False
+        self.sniff_thread = None
+        self.ip_filter = ""
+        self.protocol_filter = "All"
+        self.ip_counter = Counter()
+
+        self.setup_styles()
+        self.setup_ui()
+
+    def setup_styles(self):
+        style = self.root.style
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+        style.configure("Treeview", rowheight=25, font=("Segoe UI", 10))
+        style.configure("TLabelFrame.Label", font=("Segoe UI", 11, "bold"))
+
+    def setup_ui(self):
+        self.root.columnconfigure(0, weight=1)
+
+        header = ttk.Label(self.root, text="Network Packet Sniffer", font=("Segoe UI", 22, "bold"), bootstyle="primary-inverse")
+        header.grid(row=0, column=0, pady=(10, 5), padx=20, sticky="ew")
+
+        controls = ttk.Frame(self.root, padding=10)
+        controls.grid(row=1, column=0, sticky="ew", padx=20)
+        controls.columnconfigure((0, 1, 2, 3, 4, 5, 6, 7), weight=1)
+
+        self.start_btn = ttk.Button(controls, text="▶ Start", bootstyle="success", command=self.start_sniffing)
+        self.start_btn.grid(row=0, column=0, padx=5, pady=5)
+
+        self.stop_btn = ttk.Button(controls, text="■ Stop", bootstyle="danger", command=self.stop_sniffing, state=DISABLED)
+        self.stop_btn.grid(row=0, column=1, padx=5)
+
+        self.export_btn = ttk.Button(controls, text="💾 Export CSV", bootstyle="secondary", command=self.export_csv)
+        self.export_btn.grid(row=0, column=2, padx=5)
+
+        ttk.Label(controls, text="Protocol:").grid(row=0, column=3, padx=5)
+        self.protocol_box = ttk.Combobox(controls, values=["All", "DNS", "UDP"], width=10)
+        self.protocol_box.current(0)
+        self.protocol_box.grid(row=0, column=4, padx=5)
+
+        ttk.Label(controls, text="IP Filter:").grid(row=0, column=5, padx=5)
+        self.ip_entry = ttk.Entry(controls, width=15)
+        self.ip_entry.grid(row=0, column=6, padx=5)
+
+        self.theme_combo = ttk.Combobox(controls, values=self.root.style.theme_names(), width=10)
+        self.theme_combo.set(self.root.style.theme_use())
+        self.theme_combo.bind("<<ComboboxSelected>>", self.change_theme)
+        self.theme_combo.grid(row=0, column=7, padx=5)
+
+        log_frame = ttk.Labelframe(self.root, text="Captured Packets", padding=15, bootstyle="info")
+        log_frame.grid(row=2, column=0, padx=20, pady=10, sticky="nsew")
+        self.root.rowconfigure(2, weight=1)
+
+        columns = ("time", "proto", "src_ip", "src_port", "dst_ip", "dst_port", "bytes")
+        self.tree = ttk.Treeview(log_frame, columns=columns, show="headings", height=25, bootstyle="info")
+        headings = ["Time", "Proto", "Source IP", "Src Port", "Destination IP", "Dst Port", "Bytes"]
+        widths = [80, 60, 130, 70, 130, 70, 60]
+        for col, head, width in zip(columns, headings, widths):
+            self.tree.heading(col, text=head)
+            self.tree.column(col, width=width, anchor="center")
+
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+    def start_sniffing(self):
+        if self.sniffing:
+            return
+        self.sniffing = True
+        self.start_btn.config(state=DISABLED)
+        self.stop_btn.config(state=NORMAL)
+        self.ip_filter = self.ip_entry.get().strip()
+        self.protocol_filter = self.protocol_box.get()
+        self.tree.delete(*self.tree.get_children())
+
+        self.sniff_thread = Thread(target=self.sniff_packets, daemon=True)
+        self.sniff_thread.start()
+
+        with open("sniff_log.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Timestamp", "Protocol", "Src IP", "Src Port", "Dst IP", "Dst Port", "Size"])
+
+    def stop_sniffing(self):
+        self.sniffing = False
+        self.start_btn.config(state=NORMAL)
+        self.stop_btn.config(state=DISABLED)
+
+    def export_csv(self):
+        messagebox.showinfo("Exported", "Saved as sniff_log.csv")
+
+    def change_theme(self, event):
+        theme = self.theme_combo.get()
+        self.root.style.theme_use(theme)
+
+    def sniff_packets(self):
+        sniff(filter="udp", prn=self.handle_packet, store=False, stop_filter=lambda x: not self.sniffing)
+
+    def handle_packet(self, packet):
+        if IP in packet and UDP in packet:
+            src_ip = packet[IP].src
+            dst_ip = packet[IP].dst
+            src_port = packet[UDP].sport
+            dst_port = packet[UDP].dport
+            size = len(packet)
+            protocol = "DNS" if packet.haslayer(DNS) else "UDP"
+            timestamp = datetime.now().strftime("%H:%M:%S")
+
+            if self.protocol_filter != "All" and protocol != self.protocol_filter:
+                return
+            if self.ip_filter and self.ip_filter not in (src_ip, dst_ip):
+                return
+
+            self.tree.insert("", "end", values=(timestamp, protocol, src_ip, src_port, dst_ip, dst_port, size))
+
+            with open("sniff_log.csv", "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([timestamp, protocol, src_ip, src_port, dst_ip, dst_port, size])
+
+if __name__ == "__main__":
+    app = ttk.Window(themename="darkly", title="Network Sniffer", size=(1100, 720))
+    gui = PacketSnifferGUI(app)
+    app.mainloop()
